@@ -1,0 +1,126 @@
+# .github/workflows/auto-build-floppy.yml
+#
+# Watches the upstream Floppy Exynos 2100 kernel repo and auto-builds the
+# ReSukiSU (SukiSU + KPM + SUSFS) variant whenever a NEW commit appears.
+# Publishes each build as a GitHub Release tagged with the upstream short SHA,
+# so it never rebuilds the same commit twice.
+#
+# Put this file at:  .github/workflows/auto-build-floppy.yml
+# Then: repo Settings -> Actions -> General -> allow workflows (forks: enable in Actions tab).
+
+name: Auto-build Floppy (ReSukiSU)
+
+on:
+  schedule:
+    # Every 6 hours (UTC). Adjust as you like. NOTE: GitHub may delay scheduled
+    # runs under load, and DISABLES schedules after 60 days of repo inactivity.
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
+    inputs:
+      force:
+        description: 'Build even if this commit was already built'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write        # needed to create Releases with GITHUB_TOKEN
+
+concurrency:
+  group: floppy-auto-build
+  cancel-in-progress: false
+
+env:
+  UPSTREAM_OWNER: FlopKernel-Series
+  UPSTREAM_REPO: flop_exynos2100_kernel
+  BRANCH: floppy-main
+  VARIANT: s                 # s = ReSukiSU (SukiSU+KPM+SUSFS). Use 'k' KSU-Next, 'u' RKSU, '' Vanilla
+  ENABLE_KPM_PATCH: 'false'  # set 'true' ONLY if SukiSU manager shows KPM inactive (uncomments apply_kpm_patch)
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve latest upstream commit
+        id: up
+        run: |
+          SHA=$(git ls-remote "https://github.com/${UPSTREAM_OWNER}/${UPSTREAM_REPO}.git" "refs/heads/${BRANCH}" | cut -f1)
+          [ -n "$SHA" ] || { echo "Could not resolve upstream SHA"; exit 1; }
+          echo "sha=$SHA"            >> "$GITHUB_OUTPUT"
+          echo "short=${SHA:0:8}"    >> "$GITHUB_OUTPUT"
+          echo "Upstream ${BRANCH} is at $SHA"
+
+      - name: Decide whether to build
+        id: gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FORCE: ${{ github.event.inputs.force }}
+        run: |
+          TAG="auto-${{ steps.up.outputs.short }}"
+          if [ "$FORCE" != "true" ] && gh release view "$TAG" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "build=false" >> "$GITHUB_OUTPUT"
+            echo "Release $TAG already exists — nothing to do."
+          else
+            echo "build=true"  >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Free up disk space
+        if: steps.gate.outputs.build == 'true'
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: false
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: false
+          swap-storage: false
+
+      - name: Clone upstream (recursive — needs build/mkbootimg submodule)
+        if: steps.gate.outputs.build == 'true'
+        run: |
+          git clone --depth 1 --recurse-submodules \
+            --branch "${BRANCH}" \
+            "https://github.com/${UPSTREAM_OWNER}/${UPSTREAM_REPO}.git" kernel
+
+      - name: Cache toolchain + ccache
+        if: steps.gate.outputs.build == 'true'
+        uses: actions/cache@v4
+        with:
+          path: |
+            toolchains
+            ~/.cache/ccache
+          key: floppy-tc-ccache-${{ steps.up.outputs.short }}
+          restore-keys: |
+            floppy-tc-ccache-
+
+      - name: (Optional) Enable KPM Image patch
+        if: steps.gate.outputs.build == 'true' && env.ENABLE_KPM_PATCH == 'true'
+        working-directory: kernel
+        run: sed -i 's/^\s*#\s*apply_kpm_patch/apply_kpm_patch/' build/ckbuild.sh
+
+      - name: Build kernel
+        if: steps.gate.outputs.build == 'true'
+        working-directory: kernel
+        env:
+          WP: ${{ github.workspace }}   # toolchains land in $WP/toolchains (parent of kernel/)
+          USE_CCACHE: '1'
+        run: |
+          # deps.sh auto-installs apt packages (flex, bc, cpio, kmod, zip, lz4, brotli,
+          # ccache, aarch64 binutils) via sudo on the runner.
+          bash do_build.sh ${VARIANT}
+          echo "---- artifacts ----"; ls -lh build/*.zip build/*.tar || true
+
+      - name: Publish Release
+        if: steps.gate.outputs.build == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="auto-${{ steps.up.outputs.short }}"
+          # Clean any stale release/tag (e.g. on forced rebuild), then create fresh
+          gh release delete "$TAG" -R "$GITHUB_REPOSITORY" -y --cleanup-tag 2>/dev/null || true
+          gh release create "$TAG" \
+            -R "$GITHUB_REPOSITORY" \
+            -t "Floppy ReSukiSU @ ${{ steps.up.outputs.short }}" \
+            -n "Automated build of ${UPSTREAM_OWNER}/${UPSTREAM_REPO}@${{ steps.up.outputs.sha }}
+          Variant: ${VARIANT} (ReSukiSU / SukiSU + KPM + SUSFS)
+          Flash the .zip in OrangeFox, or the FloppyOneUI .tar via Odin (One UI base)." \
+            kernel/build/*.zip kernel/build/*.tar
