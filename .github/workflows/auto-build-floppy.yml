@@ -12,9 +12,9 @@ name: Auto-build Floppy (ReSukiSU)
 
 on:
   schedule:
-    # Every 24 hours (UTC). Adjust as you like. NOTE: GitHub may delay scheduled
+    # Every 6 hours (UTC). Adjust as you like. NOTE: GitHub may delay scheduled
     # runs under load, and DISABLES schedules after 60 days of repo inactivity.
-    - cron: '0 0 * * *'
+    - cron: '0 */6 * * *'
   workflow_dispatch:
     inputs:
       force:
