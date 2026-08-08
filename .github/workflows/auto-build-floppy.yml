@@ -2,8 +2,17 @@
 #
 # Watches the upstream Floppy Exynos 2100 kernel repo and auto-builds the
 # ReSukiSU (SukiSU + KPM + SUSFS) variant whenever a NEW commit appears.
-# Publishes each build as a GitHub Release tagged with the upstream short SHA,
-# so it never rebuilds the same commit twice.
+# Publishes each build as a GitHub Release tagged with a UTC timestamp plus the
+# upstream short SHA, so it never rebuilds the same commit twice.
+#
+# Tag format: auto-<YYYYMMDD-HHMMSS>-<upstream short SHA>
+#
+# The timestamp is not decoration. GitHub sorts the Releases page by the date of
+# the commit a tag points at — and every tag here points at the same commit on
+# this repo's default branch, so they all tie. The tie is broken on tag name,
+# descending, which with a bare SHA prefix is effectively random order. A
+# zero-padded UTC timestamp in front makes that tiebreak chronological.
+# Legacy releases still use the old "auto-<short>" form; both are recognised.
 #
 # Put this file at:  .github/workflows/auto-build-floppy.yml
 # Then: repo Settings -> Actions -> General -> allow workflows (forks: enable in Actions tab).
@@ -54,11 +63,16 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           FORCE: ${{ github.event.inputs.force }}
+          SHORT: ${{ steps.up.outputs.short }}
         run: |
-          TAG="auto-${{ steps.up.outputs.short }}"
-          if [ "$FORCE" != "true" ] && gh release view "$TAG" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+          # The tag is no longer a pure function of the SHA, so we can't just
+          # look it up by name — search every release tag for one ending in this
+          # commit. Matches both the timestamped form and the legacy bare form.
+          if [ "$FORCE" != "true" ] && \
+             gh api "repos/${GITHUB_REPOSITORY}/releases?per_page=100" --paginate --jq '.[].tag_name' \
+               | grep -qE "^auto-([0-9]{8}-[0-9]{6}-)?${SHORT}$"; then
             echo "build=false" >> "$GITHUB_OUTPUT"
-            echo "Release $TAG already exists — nothing to do."
+            echo "Commit ${SHORT} already has a release — nothing to do."
           else
             echo "build=true"  >> "$GITHUB_OUTPUT"
           fi
@@ -113,10 +127,23 @@ jobs:
         if: steps.gate.outputs.build == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
+          SHORT: ${{ steps.up.outputs.short }}
         run: |
-          TAG="auto-${{ steps.up.outputs.short }}"
-          # Clean any stale release/tag (e.g. on forced rebuild), then create fresh
-          gh release delete "$TAG" -R "$GITHUB_REPOSITORY" -y --cleanup-tag 2>/dev/null || true
+          TAG="auto-$(date -u +%Y%m%d-%H%M%S)-${SHORT}"
+
+          # On a forced rebuild there may already be a release for this commit
+          # under either naming scheme; drop them so we don't leave duplicates.
+          # `|| true` because grep exits 1 on no match and the shell runs -o pipefail.
+          mapfile -t STALE < <(
+            gh api "repos/${GITHUB_REPOSITORY}/releases?per_page=100" --paginate --jq '.[].tag_name' \
+              | grep -E "^auto-([0-9]{8}-[0-9]{6}-)?${SHORT}$" || true
+          )
+          for old in "${STALE[@]}"; do
+            [ -n "$old" ] || continue
+            echo "Removing stale release $old"
+            gh release delete "$old" -R "$GITHUB_REPOSITORY" -y --cleanup-tag 2>/dev/null || true
+          done
+
           gh release create "$TAG" \
             -R "$GITHUB_REPOSITORY" \
             -t "Floppy ReSukiSU @ ${{ steps.up.outputs.short }}" \
