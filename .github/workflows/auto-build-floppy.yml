@@ -24,9 +24,17 @@
 name: Auto-build Floppy (ReSukiSU)
 
 on:
+  # A change to our patches (or to this workflow) builds right away; the schedule
+  # below only picks up new upstream commits.
+  push:
+    branches: [main]
+    paths:
+      - 'patches/**'
+      - '.github/workflows/auto-build-floppy.yml'
   schedule:
     # Every 6 hours (UTC). Adjust as you like. NOTE: GitHub may delay scheduled
-    # runs under load, and DISABLES schedules after 60 days of repo inactivity.
+    # runs under load (here often by 2-5 hours, some slots never run), and
+    # DISABLES schedules after 60 days of repo inactivity.
     - cron: '0 */6 * * *'
   workflow_dispatch:
     inputs:
