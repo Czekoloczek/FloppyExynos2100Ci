@@ -1,0 +1,68 @@
+From d3bd84e8139a18e8094178f69b5434dc6bb72efa Mon Sep 17 00:00:00 2001
+From: Macktherealonereally <macdev@mackthessd.org>
+Date: Sat, 26 Sep 2026 14:38:47 +0200
+Subject: [PATCH] bcmdhd: Advertise NL80211_EXT_FEATURE_SAE_OFFLOAD for dongle
+ SAE
+
+With WL_SAE the dongle performs SAE itself; wpa_supplicant built with
+CONFIG_BRCM_SAE (board_wlan_bcmdhd_sae) hands it the password through
+BRCM_VENDOR_SCMD_BCM_PSK and additionally puts NL80211_ATTR_SAE_PASSWORD
+into NL80211_CMD_CONNECT.
+
+Since v5.3 nl80211_crypto_settings() rejects NL80211_ATTR_SAE_PASSWORD
+with -EINVAL unless the wiphy advertises NL80211_EXT_FEATURE_SAE_OFFLOAD
+(net/wireless/nl80211.c), so on this 5.4 kernel every WPA3 / WPA2-WPA3
+transition connect failed right after "sae passphrase set successfully":
+
+  nl80211: MLME connect failed: ret=-22 (Invalid argument)
+
+and Android reported AUTH_FAILURE_WRONG_PSWD ("Check password").
+
+Advertise the feature in WL_SAE mode so the existing firmware SAE path
+is reachable. Same fix as LineageOS android_kernel_samsung_s5e9925
+change I2b3df72f6ae5562dbd5aec35339814faa544f155.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ drivers/net/wireless/broadcom/bcmdhd_101_16/wl_cfg80211.c | 8 ++++++++
+ drivers/net/wireless/broadcom/bcmdhd_101_18/wl_cfg80211.c | 8 ++++++++
+ 2 files changed, 16 insertions(+)
+
+diff --git a/drivers/net/wireless/broadcom/bcmdhd_101_16/wl_cfg80211.c b/drivers/net/wireless/broadcom/bcmdhd_101_16/wl_cfg80211.c
+index cb89b4de3d2f..dd6cfbc12d65 100644
+--- a/drivers/net/wireless/broadcom/bcmdhd_101_16/wl_cfg80211.c
++++ b/drivers/net/wireless/broadcom/bcmdhd_101_16/wl_cfg80211.c
+@@ -10154,6 +10154,14 @@ static s32 wl_setup_wiphy(struct wireless_dev *wdev, struct device *sdiofunc_dev
+ 
+ #if defined(WL_SAE) || defined(WL_CLIENT_SAE)
+ 		wdev->wiphy->features |= NL80211_FEATURE_SAE;
++#if defined(WL_SAE) && (LINUX_VERSION_CODE >= KERNEL_VERSION(5, 3, 0))
++		/* WL_SAE: the dongle does SAE itself (password via BRCM_VENDOR_SCMD_BCM_PSK).
++		 * Since 5.3, nl80211_crypto_settings() rejects NL80211_ATTR_SAE_PASSWORD
++		 * with -EINVAL unless SAE offload is advertised, which made every
++		 * WPA3/SAE connect fail with "MLME connect failed: ret=-22".
++		 */
++		wiphy_ext_feature_set(wdev->wiphy, NL80211_EXT_FEATURE_SAE_OFFLOAD);
++#endif /* WL_SAE && LINUX_VERSION_CODE >= KERNEL_VERSION(5, 3, 0) */
+ #endif /* WL_SAE || WL_CLIENT_SAE */
+ #if (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 13, 0)) && defined(BCMSUP_4WAY_HANDSHAKE)
+ 	if (FW_SUPPORTED(dhd, idsup)) {
+diff --git a/drivers/net/wireless/broadcom/bcmdhd_101_18/wl_cfg80211.c b/drivers/net/wireless/broadcom/bcmdhd_101_18/wl_cfg80211.c
+index 87b69a917753..b5ba8b2a62e4 100644
+--- a/drivers/net/wireless/broadcom/bcmdhd_101_18/wl_cfg80211.c
++++ b/drivers/net/wireless/broadcom/bcmdhd_101_18/wl_cfg80211.c
+@@ -10438,6 +10438,14 @@ static s32 wl_setup_wiphy(struct wireless_dev *wdev, struct device *sdiofunc_dev
+ 
+ #if defined(WL_SAE) || defined(WL_CLIENT_SAE)
+ 	wdev->wiphy->features |= NL80211_FEATURE_SAE;
++#if defined(WL_SAE) && (LINUX_VERSION_CODE >= KERNEL_VERSION(5, 3, 0))
++	/* WL_SAE: the dongle does SAE itself (password via BRCM_VENDOR_SCMD_BCM_PSK).
++	 * Since 5.3, nl80211_crypto_settings() rejects NL80211_ATTR_SAE_PASSWORD
++	 * with -EINVAL unless SAE offload is advertised, which made every
++	 * WPA3/SAE connect fail with "MLME connect failed: ret=-22".
++	 */
++	wiphy_ext_feature_set(wdev->wiphy, NL80211_EXT_FEATURE_SAE_OFFLOAD);
++#endif /* WL_SAE && LINUX_VERSION_CODE >= KERNEL_VERSION(5, 3, 0) */
+ #endif /* WL_SAE || WL_CLIENT_SAE */
+ #if (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 13, 0)) && defined(BCMSUP_4WAY_HANDSHAKE)
+ 	wiphy_ext_feature_set(wdev->wiphy, NL80211_EXT_FEATURE_4WAY_HANDSHAKE_STA_PSK);

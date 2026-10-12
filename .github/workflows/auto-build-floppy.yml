@@ -1,18 +1,22 @@
 # .github/workflows/auto-build-floppy.yml
 #
 # Watches the upstream Floppy Exynos 2100 kernel repo and auto-builds the
-# ReSukiSU (SukiSU + KPM + SUSFS) variant whenever a NEW commit appears.
-# Publishes each build as a GitHub Release tagged with a UTC timestamp plus the
-# upstream short SHA, so it never rebuilds the same commit twice.
+# ReSukiSU (SukiSU + KPM + SUSFS) variant with our patches from patches/ on top.
+# A build runs when the upstream commit OR the patch set changes, and each one is
+# published as a GitHub Release, so the same combination is never built twice.
 #
-# Tag format: auto-<YYYYMMDD-HHMMSS>-<upstream short SHA>
+# Tag format: auto-<YYYYMMDD-HHMMSS>-<upstream short SHA>-p<patches/ tree SHA>
 #
 # The timestamp is not decoration. GitHub sorts the Releases page by the date of
 # the commit a tag points at — and every tag here points at the same commit on
 # this repo's default branch, so they all tie. The tie is broken on tag name,
 # descending, which with a bare SHA prefix is effectively random order. A
 # zero-padded UTC timestamp in front makes that tiebreak chronological.
-# Legacy releases still use the old "auto-<short>" form; both are recognised.
+# Releases from before patches/ existed use "auto-<stamp>-<short>" or "auto-<short>".
+#
+# patches/*.patch are applied in name order with `git am`. A patch that upstream
+# already contains is skipped; any other failure stops the build, because a
+# release without our fixes would silently bring the bugs back.
 #
 # Put this file at:  .github/workflows/auto-build-floppy.yml
 # Then: repo Settings -> Actions -> General -> allow workflows (forks: enable in Actions tab).
@@ -27,7 +31,7 @@ on:
   workflow_dispatch:
     inputs:
       force:
-        description: 'Build even if this commit was already built'
+        description: 'Build even if this commit and patch set were already built'
         type: boolean
         default: false
 
@@ -49,14 +53,22 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: Resolve latest upstream commit
+      - name: Check out this repo (patches/)
+        uses: actions/checkout@v4
+        with:
+          path: ci
+
+      - name: Resolve latest upstream commit and patch set
         id: up
         run: |
           SHA=$(git ls-remote "https://github.com/${UPSTREAM_OWNER}/${UPSTREAM_REPO}.git" "refs/heads/${BRANCH}" | cut -f1)
           [ -n "$SHA" ] || { echo "Could not resolve upstream SHA"; exit 1; }
+          # Tree SHA of patches/: changes whenever a patch is added, edited or removed.
+          PID=$(git -C ci rev-parse --short=7 HEAD:patches 2>/dev/null || echo none)
           echo "sha=$SHA"            >> "$GITHUB_OUTPUT"
           echo "short=${SHA:0:8}"    >> "$GITHUB_OUTPUT"
-          echo "Upstream ${BRANCH} is at $SHA"
+          echo "pid=$PID"            >> "$GITHUB_OUTPUT"
+          echo "Upstream ${BRANCH} is at $SHA, patch set p$PID"
 
       - name: Decide whether to build
         id: gate
@@ -64,15 +76,14 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           FORCE: ${{ github.event.inputs.force }}
           SHORT: ${{ steps.up.outputs.short }}
+          PID: ${{ steps.up.outputs.pid }}
         run: |
-          # The tag is no longer a pure function of the SHA, so we can't just
-          # look it up by name — search every release tag for one ending in this
-          # commit. Matches both the timestamped form and the legacy bare form.
-          if [ "$FORCE" != "true" ] && \
-             gh api "repos/${GITHUB_REPOSITORY}/releases?per_page=100" --paginate --jq '.[].tag_name' \
-               | grep -qE "^auto-([0-9]{8}-[0-9]{6}-)?${SHORT}$"; then
+          # Tags are read into a variable first: with `gh api … | grep -q` an early
+          # grep exit can SIGPIPE gh, and under pipefail a match would read as a miss.
+          TAGS=$(gh api "repos/${GITHUB_REPOSITORY}/releases?per_page=100" --paginate --jq '.[].tag_name')
+          if [ "$FORCE" != "true" ] && grep -qE "^auto-[0-9]{8}-[0-9]{6}-${SHORT}-p${PID}$" <<<"$TAGS"; then
             echo "build=false" >> "$GITHUB_OUTPUT"
-            echo "Commit ${SHORT} already has a release — nothing to do."
+            echo "Commit ${SHORT} with patch set p${PID} already has a release — nothing to do."
           else
             echo "build=true"  >> "$GITHUB_OUTPUT"
           fi
@@ -95,6 +106,39 @@ jobs:
             --branch "${BRANCH}" \
             "https://github.com/${UPSTREAM_OWNER}/${UPSTREAM_REPO}.git" kernel
 
+      - name: Apply our patches (patches/*.patch)
+        if: steps.gate.outputs.build == 'true'
+        working-directory: kernel
+        run: |
+          shopt -s nullglob
+          : > ../applied-patches.txt
+          for p in ../ci/patches/*.patch; do
+            n=$(basename "$p")
+            if git apply --check --reverse "$p" 2>/dev/null; then
+              echo "Already in upstream, skipping: $n"
+              continue
+            fi
+            if ! git -c user.name=ci -c user.email=ci@localhost am -q --3way "$p"; then
+              git am --abort || true
+              echo "::error::$n no longer applies to ${BRANCH}; refresh it"
+              exit 1
+            fi
+            echo "Applied: $n"
+            echo "$n" >> ../applied-patches.txt
+          done
+          # LineageOS 23.2 needs SAE offload advertised by bcmdhd_101_18, or every WPA3 network fails.
+          grep -q NL80211_EXT_FEATURE_SAE_OFFLOAD drivers/net/wireless/broadcom/bcmdhd_101_18/wl_cfg80211.c \
+            || { echo "::error::SAE offload missing in bcmdhd_101_18 after patches"; exit 1; }
+          # p3s must not have the 96 Hz based display modes (96HS, and 48HS = 96HS + TE skip): they
+          # switch the panel to 96 Hz and make it flicker in tone. The panel driver parses every mode
+          # node and never reads exposed-mode, so the nodes themselves must be gone.
+          dts=(arch/arm64/boot/dts/exynos/samsung/p3s/p3s_eur_openx_w01_r*.dts)
+          [ ${#dts[@]} -gt 0 ] || { echo "::error::no p3s DTS found"; exit 1; }
+          if grep -lE 'o3s_panel_display_mode_[0-9x]+_(96|48)hs' "${dts[@]}"; then
+            echo "::error::96/48 Hz display mode nodes are still in the p3s DTS files listed above"
+            exit 1
+          fi
+
       - name: Cache toolchain + ccache
         if: steps.gate.outputs.build == 'true'
         uses: actions/cache@v4
@@ -102,7 +146,7 @@ jobs:
           path: |
             toolchains
             ~/.cache/ccache
-          key: floppy-tc-ccache-${{ steps.up.outputs.short }}
+          key: floppy-tc-ccache-${{ steps.up.outputs.short }}-p${{ steps.up.outputs.pid }}
           restore-keys: |
             floppy-tc-ccache-
 
@@ -128,26 +172,27 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           SHORT: ${{ steps.up.outputs.short }}
+          PID: ${{ steps.up.outputs.pid }}
         run: |
-          TAG="auto-$(date -u +%Y%m%d-%H%M%S)-${SHORT}"
+          TAG="auto-$(date -u +%Y%m%d-%H%M%S)-${SHORT}-p${PID}"
 
-          # On a forced rebuild there may already be a release for this commit
-          # under either naming scheme; drop them so we don't leave duplicates.
-          # `|| true` because grep exits 1 on no match and the shell runs -o pipefail.
-          mapfile -t STALE < <(
-            gh api "repos/${GITHUB_REPOSITORY}/releases?per_page=100" --paginate --jq '.[].tag_name' \
-              | grep -E "^auto-([0-9]{8}-[0-9]{6}-)?${SHORT}$" || true
-          )
+          # On a forced rebuild there may already be a release for this commit and
+          # patch set; drop it so we don't leave duplicates.
+          TAGS=$(gh api "repos/${GITHUB_REPOSITORY}/releases?per_page=100" --paginate --jq '.[].tag_name')
+          mapfile -t STALE < <(grep -E "^auto-[0-9]{8}-[0-9]{6}-${SHORT}-p${PID}$" <<<"$TAGS" || true)
           for old in "${STALE[@]}"; do
             [ -n "$old" ] || continue
             echo "Removing stale release $old"
             gh release delete "$old" -R "$GITHUB_REPOSITORY" -y --cleanup-tag 2>/dev/null || true
           done
 
+          PATCHES=$(sed 's/^/- /' applied-patches.txt)
           gh release create "$TAG" \
             -R "$GITHUB_REPOSITORY" \
-            -t "Floppy ReSukiSU @ ${{ steps.up.outputs.short }}" \
+            -t "Floppy ReSukiSU @ ${SHORT} + patches p${PID}" \
             -n "Automated build of ${UPSTREAM_OWNER}/${UPSTREAM_REPO}@${{ steps.up.outputs.sha }}
           Variant: ${VARIANT} (ReSukiSU / SukiSU + KPM + SUSFS)
+          Patches applied (patches/ @ p${PID}):
+          ${PATCHES:-- none}
           Flash the .zip in OrangeFox, or the FloppyOneUI .tar via Odin (One UI base)." \
             kernel/build/*.zip kernel/build/*.tar
