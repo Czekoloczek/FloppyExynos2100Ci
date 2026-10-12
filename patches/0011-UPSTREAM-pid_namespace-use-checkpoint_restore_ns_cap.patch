@@ -1,0 +1,40 @@
+From 2c70d6c8ee40346e7cd22bfa2ad57789b4a56615 Mon Sep 17 00:00:00 2001
+From: Adrian Reber <areber@redhat.com>
+Date: Sun, 19 Jul 2020 12:04:13 +0200
+Subject: [PATCH] UPSTREAM: pid_namespace: use checkpoint_restore_ns_capable()
+ for ns_last_pid
+
+Use the newly introduced capability CAP_CHECKPOINT_RESTORE to allow
+writing to ns_last_pid.
+
+Change-Id: I95727c385f136818553260db0e9edfa654f7907e
+Signed-off-by: Adrian Reber <areber@redhat.com>
+Signed-off-by: Nicolas Viennot <Nicolas.Viennot@twosigma.com>
+Reviewed-by: Serge Hallyn <serge@hallyn.com>
+Acked-by: Christian Brauner <christian.brauner@ubuntu.com>
+Link: https://lore.kernel.org/r/20200719100418.2112740-4-areber@redhat.com
+Signed-off-by: Christian Brauner <christian.brauner@ubuntu.com>
+Signed-off-by: ralph950412 <ralph950412@gmail.com>
+(cherry picked from commit 63b4832326141e0d0b0f83e1a4508c067d3af566)
+[p3s: LineageOS android_kernel_qcom_sm8350 lineage-20, Gerrit 493597
+ (topic cap_checkpoint_restore); upstream commit b9a3db92e1a1]
+---
+ kernel/pid_namespace.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/kernel/pid_namespace.c b/kernel/pid_namespace.c
+index 57db6df5b..78b409b88 100644
+--- a/kernel/pid_namespace.c
++++ b/kernel/pid_namespace.c
+@@ -270,7 +270,7 @@ static int pid_ns_ctl_handler(struct ctl_table *table, int write,
+ 	struct ctl_table tmp = *table;
+ 	int ret, next;
+ 
+-	if (write && !ns_capable(pid_ns->user_ns, CAP_SYS_ADMIN))
++	if (write && !checkpoint_restore_ns_capable(pid_ns->user_ns))
+ 		return -EPERM;
+ 
+ 	/*
+-- 
+2.56.0
+

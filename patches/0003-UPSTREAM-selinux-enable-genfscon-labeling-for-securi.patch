@@ -1,0 +1,51 @@
+From 350951470dd658e0df74b85c99c44dd626a70608 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Christian=20G=C3=B6ttsche?= <cgzones@googlemail.com>
+Date: Tue, 28 Sep 2021 17:39:31 +0200
+Subject: [PATCH] UPSTREAM: selinux: enable genfscon labeling for securityfs
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Add support for genfscon per-file labeling of securityfs files.
+This allows for separate labels and thereby access control for
+different files. For example a genfscon statement
+
+    genfscon securityfs /integrity/ima/policy \
+	system_u:object_r:ima_policy_t:s0
+
+will set a private label to the IMA policy file and thus allow to
+control the ability to set the IMA policy. Setting labels directly
+with setxattr(2), e.g. by chcon(1) or setfiles(8), is still not
+supported.
+
+Signed-off-by: Christian Göttsche <cgzones@googlemail.com>
+[PM: line width fixes in the commit description]
+Signed-off-by: Paul Moore <paul@paul-moore.com>
+(cherry picked from commit 8a764ef1bd43fb2bb4ff3290746e5c820a3a9716)
+[p3s: same backport as LineageOS android_kernel_qcom_sm8350 66d56f9b5a0f
+ (Gerrit 504889) and android_kernel_samsung_universal9830 1139ac613217
+ (Gerrit 507556). Android 17 gives
+ /sys/kernel/security/safesetid/uid_allowlist_policy its own genfscon
+ label for system_server; context adjusted for Samsung's configfs entry.]
+Change-Id: Ifa71f8d3e2d9beb6f5ad6b1f7de62ac9ffcb90d4
+---
+ security/selinux/hooks.c | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/security/selinux/hooks.c b/security/selinux/hooks.c
+index 092e0843b..810158e34 100644
+--- a/security/selinux/hooks.c
++++ b/security/selinux/hooks.c
+@@ -782,7 +782,8 @@ static int selinux_set_mnt_opts(struct super_block *sb,
+ // ] SEC_SELINUX_PORTING_COMMON
+ 	    !strcmp(sb->s_type->name, "binder") ||
+ 	    !strcmp(sb->s_type->name, "bpf") ||
+-	    !strcmp(sb->s_type->name, "pstore"))
++	    !strcmp(sb->s_type->name, "pstore") ||
++	    !strcmp(sb->s_type->name, "securityfs"))
+ 		sbsec->flags |= SE_SBGENFS;
+ 
+ 	if (!strcmp(sb->s_type->name, "sysfs") ||
+-- 
+2.56.0
+

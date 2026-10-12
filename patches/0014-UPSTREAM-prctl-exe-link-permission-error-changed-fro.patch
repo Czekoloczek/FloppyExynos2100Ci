@@ -1,0 +1,39 @@
+From bca78d7dbb5c7ae27d8c118d2a62eb5b9af7750e Mon Sep 17 00:00:00 2001
+From: Nicolas Viennot <Nicolas.Viennot@twosigma.com>
+Date: Sun, 19 Jul 2020 12:04:16 +0200
+Subject: [PATCH] UPSTREAM: prctl: exe link permission error changed from
+ -EINVAL to -EPERM
+
+This brings consistency with the rest of the prctl() syscall where
+-EPERM is returned when failing a capability check.
+
+Change-Id: I1b27a485d4ca9dd99376c6628572509835aabaf3
+Signed-off-by: Nicolas Viennot <Nicolas.Viennot@twosigma.com>
+Signed-off-by: Adrian Reber <areber@redhat.com>
+Reviewed-by: Serge Hallyn <serge@hallyn.com>
+Link: https://lore.kernel.org/r/20200719100418.2112740-7-areber@redhat.com
+Signed-off-by: Christian Brauner <christian.brauner@ubuntu.com>
+Signed-off-by: ralph950412 <ralph950412@gmail.com>
+(cherry picked from commit 6b4aab010e0946adfd3c1fc332e68be0e5fe002d)
+[p3s: LineageOS android_kernel_qcom_sm8350 lineage-20, Gerrit 493600
+ (topic cap_checkpoint_restore); upstream commit 227175b2c914]
+---
+ kernel/sys.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/kernel/sys.c b/kernel/sys.c
+index 719efde24..4518019d3 100644
+--- a/kernel/sys.c
++++ b/kernel/sys.c
+@@ -2360,7 +2360,7 @@ static int prctl_set_mm_map(int opt, const void __user *addr, unsigned long data
+ 		 * This may have implications in the tomoyo subsystem.
+ 		 */
+ 		if (!checkpoint_restore_ns_capable(current_user_ns()))
+-			return -EINVAL;
++			return -EPERM;
+ 
+ 		error = prctl_set_mm_exe_file(mm, prctl_map.exe_fd);
+ 		if (error)
+-- 
+2.56.0
+
