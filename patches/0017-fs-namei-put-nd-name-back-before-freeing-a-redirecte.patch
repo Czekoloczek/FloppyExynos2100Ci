@@ -1,0 +1,45 @@
+From fb93f0214e07310b08714e70ddd5ae7f80af378e Mon Sep 17 00:00:00 2001
+From: czekoloczek <czekoloczek@pierdolnik.xyz>
+Date: Sun, 1 Nov 2026 01:34:00 +0100
+Subject: [PATCH] fs: namei: put nd->name back before freeing a redirected
+ filename
+
+path_openat() points nd->name at the filename returned by the SUSFS open
+redirect and frees it on the way out. When the walk fails with -ECHILD or
+-ESTALE, do_filp_open() calls path_openat() again with the same nameidata,
+so nd->name is already freed and path_init() reads the freelist pointer
+stored at offset 0 of the names_cache object as nd->name->name. The phone
+panics in path_init+0x24, in the netd Dns threads that open the redirected
+/system/etc/hosts.
+
+Restore the original filename before returning an error. do_o_path() and
+do_tmpfile() leave nd->name dangling the same way and are covered too,
+because their callers return through this path.
+---
+ fs/namei.c | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/fs/namei.c b/fs/namei.c
+index a71e49a..e63143c 100644
+--- a/fs/namei.c
++++ b/fs/namei.c
+@@ -3975,6 +3975,7 @@ static struct file *path_openat(struct nameidata *nd,
+ 	file = alloc_empty_file(op->open_flag, current_cred());
+ 	if (IS_ERR(file)) {
+ #ifdef CONFIG_KSU_SUSFS_OPEN_REDIRECT
++		nd->name = orig_filename;
+ 		if (fake_filename && !IS_ERR(fake_filename))
+ 			putname(fake_filename);
+ #endif // #ifdef CONFIG_KSU_SUSFS_OPEN_REDIRECT
+@@ -4013,6 +4014,8 @@ static struct file *path_openat(struct nameidata *nd,
+ 			error = -ESTALE;
+ 	}
+ #ifdef CONFIG_KSU_SUSFS_OPEN_REDIRECT
++	/* do_filp_open() retries with this nameidata after -ECHILD and -ESTALE */
++	nd->name = orig_filename;
+ 	if (fake_filename && !IS_ERR(fake_filename))
+ 		putname(fake_filename);
+ #endif // #ifdef CONFIG_KSU_SUSFS_OPEN_REDIRECT
+-- 
+2.56.0
+

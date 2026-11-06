@@ -1,9 +1,14 @@
 # .github/workflows/auto-build-floppy.yml
 #
 # Watches the upstream Floppy Exynos 2100 kernel repo and auto-builds the
-# ReSukiSU (SukiSU + KPM + SUSFS) variant with our patches from patches/ on top.
-# A build runs when the upstream commit OR the patch set changes, and each one is
-# published as a GitHub Release, so the same combination is never built twice.
+# BakaSU (formerly ReSukiSU; SukiSU + KPM + SUSFS) variant with our patches from
+# patches/ on top. A build runs when the upstream commit OR the patch set changes,
+# and each one is published as a GitHub Release, so the same combination is never
+# built twice.
+#
+# Every release also names the root manager to install with it: the newest BakaSU
+# build with the kernel's UAPI (scripts/manager_notes.py). Runs with nothing to
+# build bring that part of the existing releases up to date instead.
 #
 # Tag format: auto-<YYYYMMDD-HHMMSS>-<upstream short SHA>-p<patches/ tree SHA>
 #
@@ -24,12 +29,14 @@
 name: Auto-build Floppy (ReSukiSU)
 
 on:
-  # A change to our patches (or to this workflow) builds right away; the schedule
-  # below only picks up new upstream commits.
+  # A change to our patches builds right away. A change to this workflow or to
+  # scripts/ starts a run too, which builds only if something new is due and
+  # otherwise refreshes the release notes. The schedule picks up upstream commits.
   push:
     branches: [main]
     paths:
       - 'patches/**'
+      - 'scripts/**'
       - '.github/workflows/auto-build-floppy.yml'
   schedule:
     # Every 6 hours (UTC). Adjust as you like. NOTE: GitHub may delay scheduled
@@ -95,6 +102,12 @@ jobs:
           else
             echo "build=true"  >> "$GITHUB_OUTPUT"
           fi
+
+      - name: Refresh the root-manager section of existing releases
+        if: steps.gate.outputs.build != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 -I ci/scripts/manager_notes.py refresh "$GITHUB_REPOSITORY"
 
       - name: Free up disk space
         if: steps.gate.outputs.build == 'true'
@@ -195,12 +208,21 @@ jobs:
           done
 
           PATCHES=$(sed 's/^/- /' applied-patches.txt)
-          gh release create "$TAG" \
-            -R "$GITHUB_REPOSITORY" \
-            -t "Floppy ReSukiSU @ ${SHORT} + patches p${PID}" \
-            -n "Automated build of ${UPSTREAM_OWNER}/${UPSTREAM_REPO}@${{ steps.up.outputs.sha }}
-          Variant: ${VARIANT} (ReSukiSU / SukiSU + KPM + SUSFS)
+          cat > notes.md <<EOF
+          Automated build of ${UPSTREAM_OWNER}/${UPSTREAM_REPO}@${{ steps.up.outputs.sha }}
+          Variant: ${VARIANT} (BakaSU, formerly ReSukiSU / SukiSU + KPM + SUSFS)
           Patches applied (patches/ @ p${PID}):
           ${PATCHES:-- none}
-          Flash the .zip in OrangeFox, or the FloppyOneUI .tar via Odin (One UI base)." \
+          Flash the .zip in OrangeFox, or the FloppyOneUI .tar via Odin (One UI base).
+          EOF
+          # Which root manager goes with this kernel. Failing to tell must not hold the kernel back.
+          if SECTION=$(python3 -I ci/scripts/manager_notes.py new kernel); then
+            printf '\n%s\n' "$SECTION" >> notes.md
+          else
+            echo "::warning::Publishing without the root-manager section"
+          fi
+          gh release create "$TAG" \
+            -R "$GITHUB_REPOSITORY" \
+            -t "Floppy BakaSU @ ${SHORT} + patches p${PID}" \
+            -F notes.md \
             kernel/build/*.zip kernel/build/*.tar
