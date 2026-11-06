@@ -1,0 +1,57 @@
+From 1cd73188596eab25f17666ff2cceae799a2c92b5 Mon Sep 17 00:00:00 2001
+From: czekoloczek <czekoloczek@pierdolnik.xyz>
+Date: Fri, 6 Nov 2026 18:21:13 +0100
+Subject: [PATCH] tracing: keep trace_event_define_fields_*() out of init text
+
+event_create_dir() calls a class's define_fields() only while its field
+list is still empty. When a module's event directory cannot be created at
+load time because the same system already has an event of that name, the
+fields are never defined, and define_fields() is freed with the module's
+init text. Floppy loads several Mali KMD versions side by side and they
+all use TRACE_SYSTEM mali, so r49p1 and r54p1 hit exactly this ("Could
+not create tracefs 'mali_jit_alloc' directory" and so on).
+
+The next tracing instance walks ftrace_events from the newest event, so it
+creates the directory of the newer duplicate first and calls its freed
+define_fields(). On Android that instance is the one wifi.rc creates on
+sys.boot_completed, from init:
+
+  init: processing action (sys.boot_completed=1 && sys.wifitracing.started=0) from (/system/etc/init/wifi.rc:28)
+  kernel BUG at arch/arm64/kernel/traps.c:498!
+  Internal error: Oops - BUG: 0 [#1] PREEMPT SMP
+  pc : do_undefinstr+0x450/0x4ac
+  Call trace:
+   do_undefinstr+0x450/0x4ac
+   el1_undef+0x10/0xb4
+   event_trace_add_tracer+0x70/0x140
+   trace_array_create+0x268/0x360
+   instance_mkdir+0x10/0x40
+   tracefs_syscall_mkdir+0x60/0xa0
+   vfs_mkdir+0x198/0x1d0
+   do_mkdirat+0x90/0x1c0
+   __arm64_sys_mkdirat+0x20/0x30
+  Kernel panic - not syncing: Fatal exception
+
+so every boot of an AOSP ROM ends in a panic about 20 s in. Keep
+define_fields() resident. The functions are small, and the duplicate
+events then only fail to get a directory, as they already do at load time.
+---
+ include/trace/trace_events.h | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/include/trace/trace_events.h b/include/trace/trace_events.h
+index 4ecdfe2e3..b5cebadc4 100644
+--- a/include/trace/trace_events.h
++++ b/include/trace/trace_events.h
+@@ -446,7 +446,7 @@ static struct trace_event_functions trace_event_type_funcs_##call = {	\
+ 
+ #undef DECLARE_EVENT_CLASS
+ #define DECLARE_EVENT_CLASS(call, proto, args, tstruct, func, print)	\
+-static int notrace __init						\
++static int notrace							\
+ trace_event_define_fields_##call(struct trace_event_call *event_call)	\
+ {									\
+ 	struct trace_event_raw_##call field;				\
+-- 
+2.56.0
+
